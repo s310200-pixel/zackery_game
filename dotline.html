@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>點陣封鎖遊戲 (逆向賽制)</title>
+  <style>
+    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 20px 0; background-color: #f4f4f9; }
+    h1 { margin-bottom: 5px; color: #333; }
+    
+    /* 遊戲規則區塊 */
+    .rules-card { background: #fff; border-left: 4px solid #dc3545; padding: 12px 16px; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); max-width: 480px; width: 90%; margin-bottom: 15px; }
+    .rules-card h3 { margin: 0 0 6px 0; color: #dc3545; font-size: 1rem; }
+    .rules-card ul { margin: 0; padding-left: 20px; font-size: 0.88rem; color: #444; line-height: 1.4; }
+
+    .controls { margin-bottom: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    #info { font-size: 1.1rem; font-weight: bold; margin-bottom: 15px; color: #007bff; text-align: center; }
+    #game-container { position: relative; width: 350px; height: 350px; background: #fff; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+    canvas { position: absolute; top: 0; left: 0; z-index: 1; }
+    .grid { display: grid; width: 100%; height: 100%; position: absolute; z-index: 2; }
+    .dot-btn { background: none; border: none; outline: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
+    .dot { width: 16px; height: 16px; background-color: #ccc; border-radius: 50%; transition: all 0.2s; position: relative; }
+    .dot-btn:hover .dot:not(.banned) { background-color: #007bff; transform: scale(1.3); }
+    .dot.visited { background-color: #28a745; }
+    .dot.current { background-color: #dc3545; transform: scale(1.4); box-shadow: 0 0 8px rgba(220,53,69,0.8); }
+    .dot.valid { background-color: #ffc107; cursor: pointer; }
+    .dot.start-selected { background-color: #17a2b8; transform: scale(1.3); }
+    
+    /* 禁用格子 (Ban) 樣式 */
+    .dot.banned { background-color: #343a40; transform: scale(1.1); cursor: not-allowed; }
+    .dot.banned::after { content: '✕'; color: #fff; font-size: 10px; font-weight: bold; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+
+    button.reset-btn { padding: 6px 12px; font-size: 0.95rem; border: none; background-color: #6c757d; color: white; border-radius: 4px; cursor: pointer; }
+    button.reset-btn:hover { background-color: #5a6268; }
+    select { padding: 6px 10px; font-size: 0.95rem; border-radius: 4px; border: 1px solid #ccc; }
+  </style>
+</head>
+<body>
+
+  <h1>點陣連線遊戲</h1>
+
+  <div class="rules-card">
+    <h3>📜 遊戲規則說明（逆向賽制）</h3>
+    <ul>
+      <li><b>禁手階段</b>：遊戲開始時，雙方各選擇一個格子進行<b>封鎖（Ban）</b>，該格子全局無法經過。</li>
+      <li><b>起手第一步</b>：玩家 A 任選一個未被封鎖的點作為起點，並連接至相鄰點。</li>
+      <li><b>接續連線</b>：下一位玩家必須從上一玩家的「終點」繼續向相鄰點延伸連線。</li>
+      <li><b>限制條件</b>：所有走過或被封鎖的點<b>不可重複造訪</b>。</li>
+      <li><b>勝負判定</b>：踩到最後一個點（導致自己無路可走）<b>失敗</b>，對方獲勝！</li>
+    </ul>
+  </div>
+  
+  <div class="controls">
+    <label for="sizeSelect">盤面：</label>
+    <select id="sizeSelect" onchange="initGame()">
+      <option value="3">3 x 3</option>
+      <option value="5">5 x 5</option>
+      <option value="7">7 x 7</option>
+    </select>
+
+    <label for="modeSelect">模式：</label>
+    <select id="modeSelect" onchange="initGame()">
+      <option value="pve">單人模式 AI</option>
+      <option value="pvp">雙人對戰</option>
+    </select>
+    <button class="reset-btn" onclick="initGame()">重新開始</button>
+  </div>
+
+  <div id="info">請 玩家 A 選擇要封鎖(Ban)的格子</div>
+  
+  <div id="game-container">
+    <canvas id="lineCanvas" width="350" height="350"></canvas>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <script>
+    const grid = document.getElementById('grid');
+    const canvas = document.getElementById('lineCanvas');
+    const ctx = canvas.getContext('2d');
+    const info = document.getElementById('info');
+    const modeSelect = document.getElementById('modeSelect');
+    const sizeSelect = document.getElementById('sizeSelect');
+
+    let gridSize = 3;
+    let cellSize = 350 / 3;
+    let currentPlayer = 'A'; 
+    let currentDot = null;   
+    let tempStartDot = null; 
+    let visited = [];
+    let gameOver = false;
+    let isAI = false;
+
+    // 階段狀態: 'ban_A' -> 'ban_B' -> 'play'
+    let phase = 'ban_A';
+
+    function getPos(r, c) {
+      return { x: c * cellSize + cellSize / 2, y: r * cellSize + cellSize / 2 };
+    }
+
+    function initGame() {
+      gridSize = parseInt(sizeSelect.value);
+      cellSize = 350 / gridSize;
+
+      grid.style.gridTemplateColumns = `repeat(${gridSize}, 1fr)`;
+      grid.style.gridTemplateRows = `repeat(${gridSize}, 1fr)`;
+
+      grid.innerHTML = '';
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      currentPlayer = 'A';
+      currentDot = null;
+      tempStartDot = null;
+      visited = Array(gridSize).fill(null).map(() => Array(gridSize).fill(false));
+      gameOver = false;
+      isAI = (modeSelect.value === 'pve');
+      phase = 'ban_A';
+      
+      info.innerText = '請 玩家 A 選擇要封鎖(Ban)的格子';
+
+      for (let r = 0; r < gridSize; r++) {
+        for (let c = 0; c < gridSize; c++) {
+          const btn = document.createElement('button');
+          btn.className = 'dot-btn';
+          
+          const dot = document.createElement('div');
+          dot.className = 'dot';
+          dot.id = `dot-${r}-${c}`;
+          
+          btn.appendChild(dot);
+          btn.addEventListener('click', () => handleDotClick(r, c));
+          grid.appendChild(btn);
+        }
+      }
+    }
+
+    function handleDotClick(r, c) {
+      if (gameOver) return;
+
+      // --- 禁手階段 (Ban Phase) ---
+      if (phase === 'ban_A') {
+        banDot(r, c);
+        phase = 'ban_B';
+
+        if (isAI) {
+          info.innerText = 'AI 選擇封鎖格子中...';
+          setTimeout(aiBanMove, 400);
+        } else {
+          info.innerText = '請 玩家 B 選擇要封鎖(Ban)的格子';
+        }
+        return;
+      }
+
+      if (phase === 'ban_B') {
+        if (visited[r][c]) return;
+        banDot(r, c);
+        startPlayPhase();
+        return;
+      }
+
+      // --- 遊戲進行階段 (Play Phase) ---
+      if (isAI && currentPlayer === 'B') return;
+
+      // 第一步：選擇起點
+      if (!tempStartDot && !currentDot) {
+        if (visited[r][c]) return;
+        tempStartDot = {r, c};
+        const el = document.getElementById(`dot-${r}-${c}`);
+        el.className = 'dot start-selected';
+        info.innerText = '請選擇第一條線的「終點」（完成第一步）';
+        highlightValidMovesForStart(r, c);
+        return;
+      }
+
+      // 第一步：選擇終點
+      if (tempStartDot && !currentDot) {
+        if (isValidMove(tempStartDot.r, tempStartDot.c, r, c)) {
+          visited[tempStartDot.r][tempStartDot.c] = true;
+          const startEl = document.getElementById(`dot-${tempStartDot.r}-${tempStartDot.c}`);
+          startEl.className = 'dot visited';
+
+          drawLine(tempStartDot, {r, c});
+          selectDot(r, c);
+          tempStartDot = null;
+
+          // 判斷起手第一步是否直接走死
+          if (!hasValidMoves(r, c)) {
+            gameOver = true;
+            const nextPlayer = currentPlayer === 'A' ? 'B' : 'A';
+            const winnerName = isAI ? (nextPlayer === 'A' ? '玩家 A' : 'AI') : `玩家 ${nextPlayer}`;
+            const loserName = isAI ? (currentPlayer === 'A' ? '玩家 A' : 'AI') : `玩家 ${currentPlayer}`;
+            info.innerText = `${loserName} 走了最後一步無路可走！${winnerName} 獲勝！`;
+            clearValidHighlights();
+            return;
+          }
+
+          switchPlayer();
+        }
+        return;
+      }
+
+      // 後續正常連線
+      if (isValidMove(currentDot.r, currentDot.c, r, c)) {
+        makeMove(r, c);
+      }
+    }
+
+    function banDot(r, c) {
+      visited[r][c] = true;
+      const el = document.getElementById(`dot-${r}-${c}`);
+      el.className = 'dot banned';
+    }
+
+    function aiBanMove() {
+      let unvisitedDots = [];
+      for (let r = 0; r < gridSize; r++) {
+        for (let c = 0; c < gridSize; c++) {
+          if (!visited[r][c]) unvisitedDots.push({r, c});
+        }
+      }
+      if (unvisitedDots.length > 0) {
+        const pick = unvisitedDots[Math.floor(Math.random() * unvisitedDots.length)];
+        banDot(pick.r, pick.c);
+      }
+      startPlayPhase();
+    }
+
+    function startPlayPhase() {
+      phase = 'play';
+      currentPlayer = 'A';
+      info.innerText = isAI ? '請選擇第一條線的「起點」' : '請 玩家 A 選擇第一條線的「起點」';
+    }
+
+    function makeMove(r, c) {
+      drawLine(currentDot, {r, c});
+      selectDot(r, c);
+
+      // 檢查當前玩家移動後是否導致自己無路可走（逆向賽制判定）
+      if (!hasValidMoves(r, c)) {
+        gameOver = true;
+        const nextPlayer = currentPlayer === 'A' ? 'B' : 'A';
+        const winnerName = isAI ? (nextPlayer === 'A' ? '玩家 A' : 'AI') : `玩家 ${nextPlayer}`;
+        const loserName = isAI ? (currentPlayer === 'A' ? '玩家 A' : 'AI') : `玩家 ${currentPlayer}`;
+        info.innerText = `${loserName} 走了最後一步無路可走！${winnerName} 獲勝！`;
+        clearValidHighlights();
+        return;
+      }
+
+      switchPlayer();
+    }
+
+    function switchPlayer() {
+      currentPlayer = currentPlayer === 'A' ? 'B' : 'A';
+      
+      if (isAI) {
+        if (currentPlayer === 'B') {
+          info.innerText = 'AI 思考中...';
+          clearValidHighlights();
+          setTimeout(aiMakeMove, 400);
+        } else {
+          info.innerText = '輪到 玩家 A 移動';
+          highlightValidMoves();
+        }
+      } else {
+        info.innerText = `輪到 玩家 ${currentPlayer} 移動`;
+        highlightValidMoves();
+      }
+    }
+
+    function aiMakeMove() {
+      if (gameOver) return;
+
+      const validMoves = getValidMoves(currentDot.r, currentDot.c);
+      if (validMoves.length === 0) return;
+
+      let bestScore = -Infinity;
+      let bestMove = null;
+
+      const maxDepth = gridSize === 3 ? 10 : (gridSize === 5 ? 4 : 2);
+
+      for (const move of validMoves) {
+        visited[move.r][move.c] = true;
+        let score = minimax(move, 0, false, maxDepth, -Infinity, Infinity);
+        visited[move.r][move.c] = false;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMove = move;
+        }
+      }
+
+      if (bestMove) {
+        makeMove(bestMove.r, bestMove.c);
+      }
+    }
+
+    function minimax(curr, depth, isMaximizing, maxDepth, alpha, beta) {
+      const moves = getValidMoves(curr.r, curr.c);
+
+      // 逆向賽制評估：
+      // 如果移動到這個點後沒有後續選擇：
+      // 1. 若是 Maximizing 玩家走這一步 -> AI 把自己走死了 -> 低分 (-100)
+      // 2. 若是 Minimizing 玩家走這一步 -> 玩家把自己走死了 -> 高分 (+100)
+      if (moves.length === 0) {
+        return isMaximizing ? (-100 + depth) : (100 - depth);
+      }
+
+      if (depth >= maxDepth) {
+        // 可選步數越多越安全（不易被逼入死角）
+        return isMaximizing ? moves.length : -moves.length;
+      }
+
+      if (isMaximizing) {
+        let maxEval = -Infinity;
+        for (const move of moves) {
+          visited[move.r][move.c] = true;
+          let evaluation = minimax(move, depth + 1, false, maxDepth, alpha, beta);
+          visited[move.r][move.c] = false;
+          maxEval = Math.max(maxEval, evaluation);
+          alpha = Math.max(alpha, evaluation);
+          if (beta <= alpha) break;
+        }
+        return maxEval;
+      } else {
+        let minEval = Infinity;
+        for (const move of moves) {
+          visited[move.r][move.c] = true;
+          let evaluation = minimax(move, depth + 1, true, maxDepth, alpha, beta);
+          visited[move.r][move.c] = false;
+          minEval = Math.min(minEval, evaluation);
+          beta = Math.min(beta, evaluation);
+          if (beta <= alpha) break;
+        }
+        return minEval;
+      }
+    }
+
+    function isValidMove(r1, c1, r2, c2) {
+      if (visited[r2][c2]) return false;
+      const dr = Math.abs(r1 - r2);
+      const dc = Math.abs(c1 - c2);
+      return (dr <= 1 && dc <= 1) && !(dr === 0 && dc === 0);
+    }
+
+    function getValidMoves(r, c) {
+      const moves = [];
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const nr = r + dr;
+          const nc = c + dc;
+          if (nr >= 0 && nr < gridSize && nc >= 0 && nc < gridSize && !visited[nr][nc]) {
+            moves.push({ r: nr, c: nc });
+          }
+        }
+      }
+      return moves;
+    }
+
+    function hasValidMoves(r, c) {
+      return getValidMoves(r, c).length > 0;
+    }
+
+    function selectDot(r, c) {
+      if (currentDot) {
+        const prevEl = document.getElementById(`dot-${currentDot.r}-${currentDot.c}`);
+        if (prevEl) prevEl.className = 'dot visited';
+      }
+      currentDot = {r, c};
+      visited[r][c] = true;
+
+      const currEl = document.getElementById(`dot-${r}-${c}`);
+      if (currEl) currEl.className = 'dot current';
+    }
+
+    function drawLine(from, to) {
+      const p1 = getPos(from.r, from.c);
+      const p2 = getPos(to.r, to.c);
+
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.strokeStyle = currentPlayer === 'A' ? '#007bff' : '#dc3545';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+    }
+
+    function clearValidHighlights() {
+      for (let r = 0; r < gridSize; r++) {
+        for (let c = 0; c < gridSize; c++) {
+          const el = document.getElementById(`dot-${r}-${c}`);
+          if (el && el.classList.contains('valid')) {
+            el.className = 'dot';
+          }
+        }
+      }
+    }
+
+    function highlightValidMovesForStart(sr, sc) {
+      for (let r = 0; r < gridSize; r++) {
+        for (let c = 0; c < gridSize; c++) {
+          if (r === sr && c === sc) continue;
+          if (visited[r][c]) continue;
+          const el = document.getElementById(`dot-${r}-${c}`);
+          if (isValidMove(sr, sc, r, c)) {
+            el.className = 'dot valid';
+          } else {
+            el.className = 'dot';
+          }
+        }
+      }
+    }
+
+    function highlightValidMoves() {
+      for (let r = 0; r < gridSize; r++) {
+        for (let c = 0; c < gridSize; c++) {
+          if (!visited[r][c]) {
+            const el = document.getElementById(`dot-${r}-${c}`);
+            if (isValidMove(currentDot.r, currentDot.c, r, c)) {
+              el.className = 'dot valid';
+            } else {
+              el.className = 'dot';
+            }
+          }
+        }
+      }
+    }
+
+    initGame();
+  </script>
+</body>
+</html>
